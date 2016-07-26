@@ -1,9 +1,11 @@
 # encoding: utf-8
-require "logstash/filters/base"
+require "date"
+require "logstash/inputs/base"
 require "logstash/namespace"
-require "logstash/timestamp"
+require "socket"
+require "stud/interval"
 
-# The "netflow" codec is used for decoding Netflow v5/v9/v10 (IPFIX) flows.
+# The "netflow" input is used for decoding Netflow v5/v9/v10 (IPFIX) flows.
 #
 # ==== Supported Netflow/IPFIX exporters
 #
@@ -30,37 +32,44 @@ require "logstash/timestamp"
 # [source]
 # -----------------------------
 # input {
-#   udp {
+#   netflow {
 #     host => localhost
 #     port => 2055
-#     codec => netflow {
-#       versions => [5, 9]
-#     }
-#     type => netflow
+#     versions => [5, 9]
 #   }
-#   udp {
-#     host => localhost
-#         port => 4739
-#         codec => netflow {
-#       versions => [10]
-#       target => ipfix
-#     }
-#     type => ipfix
-#   }
-#   tcp {
+#   netflow {
 #     host => localhost
 #     port => 4739
-#     codec => netflow {
-#       versions => [10]
-#           target => ipfix
-#     }
-#     type => ipfix
+#     versions => [10]
+#     target => ipfix
 #   }
 # }
 # -----------------------------
 
-class LogStash::Codecs::Netflow < LogStash::Codecs::Base
+class LogStash::Inputs::Netflow < LogStash::Inputs::Base
   config_name "netflow"
+
+  default :codec, "plain"
+
+  # The address which logstash will listen on.
+  config :host, :validate => :string, :default => "0.0.0.0"
+
+  # The protocol used
+  config :protocol, :validate => :string, :default => "udp"
+
+  # The port which logstash will listen on. Remember that ports less
+  # than 1024 (privileged ports) may require root or elevated privileges to use.
+  config :port, :validate => :number, :required => true
+
+  # The maximum packet size to read from the network
+  config :buffer_size, :validate => :number, :default => 65536
+
+  # Number of threads processing packets
+  config :workers, :validate => :number, :default => 2
+
+  # This is the number of unprocessed UDP packets you can hold in memory
+  # before packets will start dropping.
+  config :queue_size, :validate => :number, :default => 2000
 
   # Netflow v9 template cache TTL (minutes)
   config :cache_ttl, :validate => :number, :default => 4000
@@ -106,6 +115,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
   # See <https://github.com/logstash-plugins/logstash-codec-netflow/blob/master/lib/logstash/codecs/netflow/ipfix.yaml> for the base set.
   config :ipfix_definitions, :validate => :path
 
+
   NETFLOW5_FIELDS = ['version', 'flow_seq_num', 'engine_type', 'engine_id', 'sampling_algorithm', 'sampling_interval', 'flow_records']
   NETFLOW9_FIELDS = ['version', 'flow_seq_num']
   NETFLOW9_SCOPES = {
@@ -119,13 +129,16 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
   SWITCHED = /_switched$/
   FLOWSET_ID = "flowset_id"
 
-  def initialize(params = {})
-    super(params)
-    @threadsafe = false
-  end
+  public
+  def initialize(params)
+    super
+    BasicSocket.do_not_reverse_lookup = true
+  end # def initialize
 
+  public
   def register
     require "logstash/codecs/netflow/util"
+    @udp = nil
     @netflow_templates = Vash.new()
     @ipfix_templates = Vash.new()
 
@@ -136,7 +149,85 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
     # Path to default IPFIX field definitions
     filename = ::File.expand_path('netflow/ipfix.yaml', ::File.dirname(__FILE__))
     @ipfix_fields = load_definitions(filename, @ipfix_definitions)
+
   end # def register
+
+  public
+  def run(output_queue)
+  @output_queue = output_queue
+    begin
+      # udp server
+      udp_listener(output_queue)
+    rescue => e
+      @logger.warn("UDP listener died", :exception => e, :backtrace => e.backtrace)
+      Stud.stoppable_sleep(5) { stop? }
+      retry unless stop?
+    end # begin
+  end # def run
+
+  private
+  def udp_listener(output_queue)
+    @logger.info("Starting UDP listener", :address => "#{@host}:#{@port}")
+
+    if @udp && ! @udp.closed?
+      @udp.close
+    end
+
+    @udp = UDPSocket.new(Socket::AF_INET)
+    @udp.bind(@host, @port)
+
+    @input_to_worker = SizedQueue.new(@queue_size)
+
+    @input_workers = @workers.times do |i|
+      @logger.debug("Starting UDP worker thread", :worker => i)
+      Thread.new { inputworker(i) }
+    end
+
+    while !stop?
+      next if IO.select([@udp], [], [], 0.5).nil?
+      #collect datagram message and add to queue
+      payload, client = @udp.recvfrom_nonblock(@buffer_size)
+      next if payload.empty?
+      @input_to_worker.push([payload, client])
+    end
+  ensure
+    if @udp
+      @udp.close_read rescue nil
+      @udp.close_write rescue nil
+    end
+  end # def udp_listener
+
+  def inputworker(number)
+    LogStash::Util::set_thread_name("<netflow.#{number}")
+   
+    begin
+      while true
+        payload, client = @input_to_worker.pop
+        metadata_to_codec = {}
+        metadata_to_codec["port"] = client[1]
+        metadata_to_codec["host"] = client[3]
+        decode(payload, metadata_to_codec) do |event|
+          decorate(event)
+          event["host"] ||= client[3]
+#          for LS >= 5.0:
+#          event.set("host", client[3]) if event.get("host").nil?
+          @output_queue.push(event)
+        end
+      end
+    rescue => e
+      @logger.error("Exception in inputworker", "exception" => e, "backtrace" => e.backtrace)
+    end
+  end # def inputworker
+
+  public
+  def close
+    @udp.close rescue nil
+  end
+
+  public
+  def stop
+    @udp.close rescue nil
+  end
 
   def decode(payload, metadata = nil, &block)
     header = Header.read(payload)
@@ -277,8 +368,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
         @logger.warn("No matching template for flow id #{record.flowset_id}")
         next
       end
-
-      length = record.flowset_length - 4
+     length = record.flowset_length - 4
 
       # Template shouldn't be longer than the record and there should
       # be at most 3 padding bytes
@@ -544,4 +634,4 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
       @logger.warn("Definition should be an array", :field => field)
     end
   end
-end # class LogStash::Filters::Netflow
+end # class LogStash::Inputs::Netflow

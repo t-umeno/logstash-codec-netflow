@@ -1,3 +1,7 @@
+## 4.0.0
+
+  - Moved to logstash-input-netflow to resolve fundamental issues with lacking metadata for proper Netflow and IPFIX decoding.
+
 ## 3.1.3
 
   - Confirmed support and tests added for 4 Netflow/IPFIX exporters
