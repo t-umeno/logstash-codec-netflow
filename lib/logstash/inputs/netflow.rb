@@ -137,7 +137,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
 
   public
   def register
-    require "logstash/codecs/netflow/util"
+    require "logstash/inputs/netflow/util"
     @udp = nil
     @netflow_templates = Vash.new()
     @ipfix_templates = Vash.new()
@@ -149,7 +149,6 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
     # Path to default IPFIX field definitions
     filename = ::File.expand_path('netflow/ipfix.yaml', ::File.dirname(__FILE__))
     @ipfix_fields = load_definitions(filename, @ipfix_definitions)
-
   end # def register
 
   public
@@ -159,9 +158,11 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
       # udp server
       udp_listener(output_queue)
     rescue => e
-      @logger.warn("UDP listener died", :exception => e, :backtrace => e.backtrace)
-      Stud.stoppable_sleep(5) { stop? }
-      retry unless stop?
+      if !stop?
+        @logger.warn("UDP listener died", :exception => e, :backtrace => e.backtrace)
+        Stud.stoppable_sleep(5) { stop? }
+        retry unless stop?
+      end
     end # begin
   end # def run
 
@@ -198,19 +199,17 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
   end # def udp_listener
 
   def inputworker(number)
-    LogStash::Util::set_thread_name("<netflow.#{number}")
+    LogStash::Util::set_thread_name("<udp.#{number}")
    
     begin
       while true
         payload, client = @input_to_worker.pop
-        metadata_to_codec = {}
-        metadata_to_codec["port"] = client[1]
-        metadata_to_codec["host"] = client[3]
-        decode(payload, metadata_to_codec) do |event|
+        metadata = {}
+        metadata["port"] = client[1]
+        metadata["host"] = client[3]
+        decode(payload, metadata) do |event|
           decorate(event)
-          event["host"] ||= client[3]
-#          for LS >= 5.0:
-#          event.set("host", client[3]) if event.get("host").nil?
+          event.set("host", client[3]) if event.get("host").nil?
           @output_queue.push(event)
         end
       end
@@ -234,6 +233,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
 
     unless @versions.include?(header.version)
       @logger.warn("Ignoring Netflow version v#{header.version}")
+      yield LogStash::Event.new("message" => "Ignoring Netflow version v#{header.version}", "tags" => ["_netflowdecodefailure"])
       return
     end
 
@@ -245,11 +245,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
     elsif header.version == 9
       flowset = Netflow9PDU.read(payload)
       flowset.records.each do |record|
-        if metadata != nil
-          decode_netflow9(flowset, record, metadata).each{|event| yield(event)}
-        else
-          decode_netflow9(flowset, record).each{|event| yield(event)}
-        end
+        decode_netflow9(flowset, record, metadata).each{|event| yield(event)}
       end
     elsif header.version == 10
       flowset = IpfixPDU.read(payload)
@@ -258,9 +254,11 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
       end
     else
       @logger.warn("Unsupported Netflow version v#{header.version}")
+      yield LogStash::Event.new("message" => "Unsupported Netflow version v#{header.version}", "tags" => ["_netflowdecodefailure"])
     end
   rescue BinData::ValidityError, IOError => e
-    @logger.warn("Invalid netflow packet received (#{e})")
+    @logger.warn("Invalid netflow packet received from #{metadata["host"]} (#{e})")
+    yield LogStash::Event.new("message" => "Invalid netflow packet received from #{metadata["host"]} (#{e})", "tags" => ["_netflowdecodefailure"])
   end
 
   private
@@ -299,7 +297,8 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
 
     LogStash::Event.new(event)
   rescue BinData::ValidityError, IOError => e
-    @logger.warn("Invalid netflow packet received (#{e})")
+    @logger.warn("Invalid netflow v5 packet received from #{metadata["host"]} (#{e})")
+    LogStash::Event.new("message" => "Invalid netflow v5 packet received from #{metadata["host"]} (#{e})", "tags" => ["_netflowdecodefailure"])
   end
 
   def decode_netflow9(flowset, record, metadata = nil)
@@ -317,12 +316,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
             fields += entry
           end
           # We get this far, we have a list of fields
-          #key = "#{flowset.source_id}|#{event["source"]}|#{template.template_id}"
-          if metadata != nil
-            key = "#{flowset.source_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
-          else
-            key = "#{flowset.source_id}|#{template.template_id}"
-          end
+          key = "#{flowset.source_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
           @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
           # Purge any expired templates
           @netflow_templates.cleanup!
@@ -343,11 +337,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
           end
           # We get this far, we have a list of fields
           #key = "#{flowset.source_id}|#{event["source"]}|#{template.template_id}"
-          if metadata != nil
-            key = "#{flowset.source_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
-          else
-            key = "#{flowset.source_id}|#{template.template_id}"
-          end
+          key = "#{flowset.source_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
           @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
           # Purge any expired templates
           @netflow_templates.cleanup!
@@ -355,17 +345,11 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
       end
     when 256..65535
       # Data flowset
-      #key = "#{flowset.source_id}|#{event["source"]}|#{record.flowset_id}"
-      if metadata != nil
-        key = "#{flowset.source_id}|#{record.flowset_id}|#{metadata["host"]}|#{metadata["port"]}"
-      else
-        key = "#{flowset.source_id}|#{record.flowset_id}"
-      end
+      key = "#{flowset.source_id}|#{record.flowset_id}|#{metadata["host"]}|#{metadata["port"]}"
       template = @netflow_templates[key]
 
       unless template
-        #@logger.warn("No matching template for flow id #{record.flowset_id} from #{event["source"]}")
-        @logger.warn("No matching template for flow id #{record.flowset_id}")
+        @logger.warn("No matching netflow v9 template for flow id #{record.flowset_id} from #{metadata["host"]}")
         next
       end
      length = record.flowset_length - 4
@@ -373,7 +357,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
       # Template shouldn't be longer than the record and there should
       # be at most 3 padding bytes
       if template.num_bytes > length or ! (length % template.num_bytes).between?(0, 3)
-        @logger.warn("Template length doesn't fit cleanly into flowset", :template_id => record.flowset_id, :template_length => template.num_bytes, :record_length => length)
+        @logger.warn("Netflow v9 template length doesn't fit cleanly into flowset", :template_id => record.flowset_id, :template_length => template.num_bytes, :record_length => length)
         next
       end
 
@@ -409,12 +393,14 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
         events << LogStash::Event.new(event)
       end
     else
-      @logger.warn("Unsupported flowset id #{record.flowset_id}")
+      @logger.warn("Unsupported flowset id #{record.flowset_id} in Netflow v9 from #{metadata["host"]}")
+      LogStash::Event.new("message" => "Unsupported flowset id #{record.flowset_id} in Netflow v9 from #{metadata["host"]}", "tags" => ["_netflowdecodefailure"])
     end
 
     events
   rescue BinData::ValidityError, IOError => e
-    @logger.warn("Invalid netflow packet received (#{e})")
+    @logger.warn("Invalid netflow v9 packet received (#{e}) from #{metadata["host"]}")
+    LogStash::Event.new("message" => "Invalid netflow v9 packet received (#{e}) from #{metadata["host"]}", "tags" => ["_netflowdecodefailure"])
   end
 
   def decode_ipfix(flowset, record)
@@ -499,7 +485,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
       template = @ipfix_templates[key]
 
       unless template
-        @logger.warn("No matching template for flow id #{record.flowset_id}")
+        @logger.warn("No matching template for flow id #{record.flowset_id} from #{metadata["host"]}")
         next
       end
 
@@ -539,12 +525,13 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
         events << LogStash::Event.new(event)
       end
     else
-      @logger.warn("Unsupported flowset id #{record.flowset_id}")
+      @logger.warn("Unsupported flowset id #{record.flowset_id} from #{metadata["host"]}")
     end
 
     events
   rescue BinData::ValidityError => e
-    @logger.warn("Invalid IPFIX packet received (#{e})")
+    @logger.warn("Invalid IPFIX packet received (#{e}) from #{metadata["host"]}")
+    LogStash::Event.new("message" => "Invalid IPFIX packet received (#{e}) from #{metadata["host"]}", "tags" => ["_netflowdecodefailure"])
   end
 
   def load_definitions(defaults, extra)

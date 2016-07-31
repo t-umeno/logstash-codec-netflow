@@ -22,6 +22,7 @@ Gem::Specification.new do |s|
   # Gem dependencies
   # FIXME: temporary relax to >=1.00 so we can test with LS 2.3.4
   s.add_runtime_dependency "logstash-core-plugin-api", ">= 1.00", "<= 2.99"
+  s.add_runtime_dependency "logstash-codec-plain", [">= 1.0.0"]
   s.add_runtime_dependency 'bindata', ['>= 1.5.0']
   s.add_runtime_dependency 'stud', ['~> 0.0.22']
   s.add_development_dependency 'logstash-devutils', ['>= 1.0.0']
