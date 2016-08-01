@@ -250,7 +250,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
     elsif header.version == 10
       flowset = IpfixPDU.read(payload)
       flowset.records.each do |record|
-        decode_ipfix(flowset, record).each { |event| yield(event) }
+        decode_ipfix(flowset, record, metadata).each { |event| yield(event) }
       end
     else
       @logger.warn("Unsupported Netflow version v#{header.version}")
@@ -336,7 +336,6 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
             fields += entry
           end
           # We get this far, we have a list of fields
-          #key = "#{flowset.source_id}|#{event["source"]}|#{template.template_id}"
           key = "#{flowset.source_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
           @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
           # Purge any expired templates
@@ -403,7 +402,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
     LogStash::Event.new("message" => "Invalid netflow v9 packet received (#{e}) from #{metadata["host"]}", "tags" => ["_netflowdecodefailure"])
   end
 
-  def decode_ipfix(flowset, record)
+  def decode_ipfix(flowset, record, metadata)
     events = []
 
     case record.flowset_id
@@ -436,8 +435,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
             throw :field unless entry
             fields += entry
           end
-          # FIXME Source IP address required in key
-          key = "#{flowset.observation_domain_id}|#{template.template_id}"
+          key = "#{flowset.observation_domain_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
           @ipfix_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
           # Purge any expired templates
           @ipfix_templates.cleanup!
@@ -472,8 +470,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
             throw :field unless entry
             fields += entry
           end
-          # FIXME Source IP address required in key
-          key = "#{flowset.observation_domain_id}|#{template.template_id}"
+          key = "#{flowset.observation_domain_id}|#{template.template_id}|#{metadata["host"]}|#{metadata["port"]}"
           @ipfix_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
           # Purge any expired templates
           @ipfix_templates.cleanup!
@@ -481,7 +478,7 @@ class LogStash::Inputs::Netflow < LogStash::Inputs::Base
       end
     when 256..65535
       # Data flowset
-      key = "#{flowset.observation_domain_id}|#{record.flowset_id}"
+      key = "#{flowset.observation_domain_id}|#{record.flowset_id}|#{metadata["host"]}|#{metadata["port"]}"
       template = @ipfix_templates[key]
 
       unless template
