@@ -1362,4 +1362,104 @@ describe LogStash::Inputs::Netflow do
 
   end
  
+  # -------------
+
+  context "receiving overlapping netflow v9 templates from multple exporters" do
+
+    subject      { LogStash::Plugin.lookup("input", "netflow").new(config) }
+
+    before(:each) do
+      subject.register
+    end
+
+    after :each do
+      subject.close rescue nil
+    end
+
+    let(:port)   { rand(1024..65535) }
+    let(:config) do
+      conf = { 
+        "port" => port 
+      }
+    end
+
+    let(:client1) { LogStash::Inputs::Test::UDPClient.new(port) }
+    let(:client2) { LogStash::Inputs::Test::UDPClient.new(port) }
+
+    let(:events) do
+      helper.input(subject) do
+        # First we send template #256 and data (cisco router) from client 1, this should produce 1 flow record
+        data = IO.read(File.join(File.dirname(__FILE__), "netflow9_test_cisco_router_tpl_data.dat"), :mode => "rb")
+        client1.send(data)
+        sleep(1)
+        # Then we send template #256, #257 ... (cisco asa) from client 1, without the source-ip fix, this template 
+        # would overwrite the one from the cisco router because they share the same template id
+        data = IO.read(File.join(File.dirname(__FILE__), "netflow9_test_cisco_asa_2_tpl_26x.dat"), :mode => "rb")
+        client2.send(data)
+        sleep(1)
+        data = IO.read(File.join(File.dirname(__FILE__), "netflow9_test_cisco_asa_2_tpl_27x.dat"), :mode => "rb")
+        client2.send(data)
+        sleep(1)
+        # Finally we send data (cisco router) from client1, which should now produce decodable flowsets
+        data = IO.read(File.join(File.dirname(__FILE__), "netflow9_test_cisco_router_data.dat"), :mode => "rb")
+        client1.send(data)
+        sleep(1)
+      end
+    end
+
+    let(:json_events) do
+      events = []
+      events << <<-END
+        {
+          "@timestamp": "2015-10-09T09:51:09.000Z",
+          "netflow": {
+            "output_snmp": 1, 
+            "dst_as": 0, 
+            "dst_mask": 24, 
+            "in_pkts": 1, 
+            "ipv4_dst_addr": "192.168.23.1", 
+            "src_tos": 192, 
+            "first_switched": "2015-10-09T09:51:05.999Z", 
+            "flowset_id": 256, 
+            "l4_src_port": 0, 
+            "ipv4_next_hop": "192.168.13.2", 
+            "src_mask": 24, 
+            "version": 9, 
+            "flow_seq_num": 12256, 
+            "ipv4_src_addr": "10.0.0.1", 
+            "in_bytes": 188, 
+            "protocol": 1, 
+            "last_switched": "2015-10-09T09:51:05.999Z", 
+            "input_snmp": 2, 
+            "tcp_flags": 16, 
+            "flow_sampler_id": 0, 
+            "l4_dst_port": 771, 
+            "direction": 0, 
+            "src_as": 0
+          },
+          "@version":"1"
+        }
+      END
+
+      events.map{|event| event.gsub(/\s+/, "")}
+    end
+
+    # These tests will start to fail whenever options template decoding is added.
+    # Nprobe includes options templates, which this test included a sample from.
+    # Currently it is not decoded, but if it is, decode.size will be 9, and 
+    # the packet currently identified with decode[7] will be decode[8]
+
+    it "should decode 11 records" do
+      expect(events.size).to eq(11)
+    end
+
+    it "should serialize last event to json" do
+      event = JSON.parse(events[10].to_json)
+      event.delete("host")
+      expect(event).to eq(JSON.parse(json_events[0]))
+    end
+
+  end
+
+
 end
