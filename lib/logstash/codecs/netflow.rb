@@ -219,11 +219,11 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
       # Template flowset
       record.flowset_data.templates.each do |template|
         catch (:field) do
-          fields = []
+          template_fields = []
           template.record_fields.each do |field|
             entry = netflow_field_for(field.field_type, field.field_length)
             throw :field unless entry
-            fields += entry
+            template_fields += entry
           end
           # We get this far, we have a list of fields
           #key = "#{flowset.source_id}|#{event["source"]}|#{template.template_id}"
@@ -232,7 +232,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
           else
             key = "#{flowset.source_id}|#{template.template_id}"
           end
-          @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
+          @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => template_fields)
           # Purge any expired templates
           @netflow_templates.cleanup!
         end
@@ -241,14 +241,14 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
       # Options template flowset
       record.flowset_data.templates.each do |template|
         catch (:field) do
-          fields = []
+          template_fields = []
           template.scope_fields.each do |field|
-            fields << [uint_field(0, field.field_length), NETFLOW9_SCOPES[field.field_type]]
+            template_fields << [uint_field(0, field.field_length), NETFLOW9_SCOPES[field.field_type]]
           end
           template.option_fields.each do |field|
             entry = netflow_field_for(field.field_type, field.field_length)
             throw :field unless entry
-            fields += entry
+            template_fields += entry
           end
           # We get this far, we have a list of fields
           #key = "#{flowset.source_id}|#{event["source"]}|#{template.template_id}"
@@ -257,7 +257,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
           else
             key = "#{flowset.source_id}|#{template.template_id}"
           end
-          @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
+          @netflow_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => template_fields)
           # Purge any expired templates
           @netflow_templates.cleanup!
         end
@@ -335,7 +335,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
       # Template flowset
       record.flowset_data.templates.each do |template|
         catch (:field) do
-          fields = []
+          template_fields = []
           template.record_fields.each do |field|
             field_type = field.field_type
             field_length = field.field_length
@@ -358,11 +358,11 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
 
             entry = ipfix_field_for(field_type, enterprise_id, field.field_length)
             throw :field unless entry
-            fields += entry
+            template_fields += entry
           end
           # FIXME Source IP address required in key
           key = "#{flowset.observation_domain_id}|#{template.template_id}"
-          @ipfix_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
+          @ipfix_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => template_fields)
           # Purge any expired templates
           @ipfix_templates.cleanup!
         end
@@ -371,7 +371,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
       # Options template flowset
       record.flowset_data.templates.each do |template|
         catch (:field) do
-          fields = []
+          template_fields = []
           (template.scope_fields.to_ary + template.option_fields.to_ary).each do |field|
             field_type = field.field_type
             field_length = field.field_length
@@ -394,11 +394,11 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
 
             entry = ipfix_field_for(field_type, enterprise_id, field.field_length)
             throw :field unless entry
-            fields += entry
+            template_fields += entry
           end
           # FIXME Source IP address required in key
           key = "#{flowset.observation_domain_id}|#{template.template_id}"
-          @ipfix_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => fields)
+          @ipfix_templates[key, @cache_ttl] = BinData::Struct.new(:endian => :big, :fields => template_fields)
           # Purge any expired templates
           @ipfix_templates.cleanup!
         end
@@ -459,7 +459,7 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
 
   def load_definitions(defaults, extra)
     begin
-      fields = YAML.load_file(defaults)
+      template_fields = YAML.load_file(defaults)
     rescue Exception => e
       raise "#{self.class.name}: Bad syntax in definitions file #{defaults}"
     end
@@ -468,13 +468,13 @@ class LogStash::Codecs::Netflow < LogStash::Codecs::Base
     if extra
       raise "#{self.class.name}: definitions file #{extra} does not exist" unless File.exists?(extra)
       begin
-        fields.merge!(YAML.load_file(extra))
+        template_fields.merge!(YAML.load_file(extra))
       rescue Exception => e
         raise "#{self.class.name}: Bad syntax in definitions file #{extra}"
       end
     end
 
-    fields
+    template_fields
   end
 
   def uint_field(length, default)
